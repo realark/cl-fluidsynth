@@ -1,18 +1,18 @@
-; Copyright (c) 2015-2016 Tito Latini
-;
-; This library is free software; you can redistribute it and/or
-; modify it under the terms of the GNU Lesser General Public
-; License as published by the Free Software Foundation; either
-; version 2.1 of the License, or (at your option) any later version.
-;
-; This library is distributed in the hope that it will be useful,
-; but WITHOUT ANY WARRANTY; without even the implied warranty of
-; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-; Lesser General Public License for more details.
-;
-; You should have received a copy of the GNU Lesser General Public
-; License along with this library; if not, write to the Free Software
-; Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+;;; Copyright (c) 2015-2018 Tito Latini
+;;;
+;;; This library is free software; you can redistribute it and/or
+;;; modify it under the terms of the GNU Lesser General Public
+;;; License as published by the Free Software Foundation; either
+;;; version 2.1 of the License, or (at your option) any later version.
+;;;
+;;; This library is distributed in the hope that it will be useful,
+;;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+;;; Lesser General Public License for more details.
+;;;
+;;; You should have received a copy of the GNU Lesser General Public
+;;; License along with this library; if not, write to the Free Software
+;;; Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
 (in-package :fluidsynth)
 
@@ -25,11 +25,13 @@
               (case type
                 (#.NUM-TYPE (values #'settings-getnum :double))
                 (#.INT-TYPE (values #'settings-getint :int))
-                (#.STR-TYPE (values #'settings-getstr :string))
+                (#.STR-TYPE (values #'settings-dupstr :string))
                 (otherwise (error "unknown setting type")))
             (cffi:with-foreign-object (ptr :double)
               (funcall get-cb settings name ptr)
-              (cffi:mem-ref ptr foreign-type)))))))
+              (prog1 (cffi:mem-ref ptr foreign-type)
+                (when (= type STR-TYPE)
+                  (cffi:foreign-free (cffi:mem-ref ptr :pointer))))))))))
 
 (defun set-setting (settings name value)
   (unless (deleted-p settings)
@@ -62,21 +64,19 @@
 
 (defvar *set-logger-functions-p* t)
 
-(cffi:defcallback log-function :void
-    ((level :int) (msg :string) (data :pointer))
-  (declare (ignore data))
-  (format *logger-stream*
-          "cl-fluidsynth: ~[panic: ~;error: ~;warning: ~;~;debug: ~]~A~%"
-          level msg)
-  (force-output *logger-stream*))
-
 (defun set-logger-functions ()
+  (unless (ignore-errors (cffi:callback log-function))
+    (cffi:defcallback log-function :void ((level :int) (msg :string) (data :pointer))
+      (declare (ignore data))
+      (format *logger-stream*
+              "cl-fluidsynth: ~[panic: ~;error: ~;warning: ~;~;debug: ~]~A~%"
+              level msg)
+      (force-output *logger-stream*)))
   (dotimes (level 5)
     (cffi:foreign-funcall "fluid_set_log_function" :int level
-                                                   :pointer (cffi:callback
-                                                             log-function)
-                                                   :pointer (cffi:null-pointer)
-                                                   :void)))
+                          :pointer (cffi:callback log-function)
+                          :pointer (cffi:null-pointer)
+                          :void)))
 
 (defun new-settings (&optional setting-list)
   (without-interrupts

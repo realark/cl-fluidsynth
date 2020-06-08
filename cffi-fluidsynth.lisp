@@ -1,49 +1,54 @@
-; Copyright (c) 2015 Tito Latini
-;
-; This library is free software; you can redistribute it and/or
-; modify it under the terms of the GNU Lesser General Public
-; License as published by the Free Software Foundation; either
-; version 2.1 of the License, or (at your option) any later version.
-;
-; This library is distributed in the hope that it will be useful,
-; but WITHOUT ANY WARRANTY; without even the implied warranty of
-; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-; Lesser General Public License for more details.
-;
-; You should have received a copy of the GNU Lesser General Public
-; License along with this library; if not, write to the Free Software
-; Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+;;; Copyright (c) 2015-2018 Tito Latini
+;;;
+;;; This library is free software; you can redistribute it and/or
+;;; modify it under the terms of the GNU Lesser General Public
+;;; License as published by the Free Software Foundation; either
+;;; version 2.1 of the License, or (at your option) any later version.
+;;;
+;;; This library is distributed in the hope that it will be useful,
+;;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+;;; Lesser General Public License for more details.
+;;;
+;;; You should have received a copy of the GNU Lesser General Public
+;;; License along with this library; if not, write to the Free Software
+;;; Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
 (in-package :fluidsynth)
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (cffi:define-foreign-library fluidsynth
-    (:cygwin "fluidsynth-0.dll")
     (:darwin "libfluidsynth.dylib")
     (:unix "libfluidsynth.so")
-    (t (:default "libfluidsynth.so")))
+    (:cygwin "fluidsynth-0.dll")
+    (:win32 "libfluidsynth-2.dll")
+    (t (:default "libfluidsynth")))
 
   (unless (cffi:foreign-library-loaded-p 'fluidsynth)
     (cffi:use-foreign-library fluidsynth)))
 
-(defstruct wrapped-pointer
+(defun version ()
+  (cffi:with-foreign-objects ((major :int) (minor :int) (micro :int))
+    (cffi:foreign-funcall "fluid_version"
+      :pointer major :pointer minor :pointer micro :void)
+    (values (cffi:mem-ref major :int)
+            (cffi:mem-ref minor :int)
+            (cffi:mem-ref micro :int))))
+
+(defstruct wrap-pointer
   (ptr (cffi:null-pointer) :type cffi:foreign-pointer))
 
-(defmethod print-object ((obj wrapped-pointer) stream)
-  (format stream "#<~S #X~8,'0X>" (type-of obj) (cffi:pointer-address
-						 (wrapped-pointer-ptr obj))))
+(defmethod print-object ((obj wrap-pointer) stream)
+  (format stream "#<~S #X~8,'0X>" (type-of obj)
+          (cffi:pointer-address (wrap-pointer-ptr obj))))
 
 (declaim (inline deleted-p))
 (defun deleted-p (obj)
-  (cffi:null-pointer-p (wrapped-pointer-ptr obj)))
+  (cffi:null-pointer-p (wrap-pointer-ptr obj)))
 
-(defstruct (synth (:include wrapped-pointer)))
+(defstruct (synth (:include wrap-pointer)))
 
-(defstruct (settings (:include wrapped-pointer)))
-
-(defstruct (audio-driver (:include wrapped-pointer)))
-
-(defstruct (player (:include wrapped-pointer)))
+(defstruct (settings (:include wrap-pointer)))
 
 (cffi:define-foreign-type settings-type ()
   ()
@@ -55,59 +60,53 @@
   (:actual-type :pointer)
   (:simple-parser synth))
 
-(cffi:define-foreign-type audio-driver-type ()
-  ()
-  (:actual-type :pointer)
-  (:simple-parser audio-driver))
-
-(cffi:define-foreign-type player-type ()
-  ()
-  (:actual-type :pointer)
-  (:simple-parser player))
-
 (defmethod cffi:translate-to-foreign (handle (type settings-type))
   (settings-ptr handle))
 
 (defmethod cffi:translate-to-foreign (handle (type synth-type))
   (synth-ptr handle))
 
-(defmethod cffi:translate-to-foreign (handle (type audio-driver-type))
-  (audio-driver-ptr handle))
+(define-constant HINT-BOUNDED-BELOW  #x01)
+(define-constant HINT-BOUNDED-ABOVE  #x02)
+(define-constant HINT-TOGGLED        #x04)
+(define-constant HINT-SAMPLE-RATE    #x08)
+(define-constant HINT-LOGARITHMIC    #x10)
+(define-constant HINT-INTEGER        #x20)
+(define-constant HINT-FILENAME       #x01)
+(define-constant HINT-OPTIONLIST     #x02)
 
-(defmethod cffi:translate-to-foreign (handle (type player-type))
-  (player-ptr handle))
-
-(define-constant HINT-BOUNDED-BELOW #x01)
-(define-constant HINT-BOUNDED-ABOVE #x02)
-(define-constant HINT-TOGGLED       #x04)
-(define-constant HINT-SAMPLE-RATE   #x08)
-(define-constant HINT-LOGARITHMIC   #x10)
-(define-constant HINT-INTEGER       #x20)
-(define-constant HINT-FILENAME      #x01)
-(define-constant HINT-OPTIONLIST    #x02)
-
-(define-constant NO-TYPE  -1)
-(define-constant NUM-TYPE  0)
-(define-constant INT-TYPE  1)
-(define-constant STR-TYPE  2)
-(define-constant SET-TYPE  3)
+(define-constant NO-TYPE   -1)
+(define-constant NUM-TYPE   0)
+(define-constant INT-TYPE   1)
+(define-constant STR-TYPE   2)
+(define-constant SET-TYPE   3)
 
 (cffi:defcfun ("new_fluid_settings" new-fluid-settings) :pointer)
 
 (cffi:defcfun ("delete_fluid_settings" delete-fluid-settings) :void
   (settings :pointer))
 
+(declaim (inline finalize))
+(defun finalize (obj function)
+  #+sbcl (sb-ext:finalize obj function :dont-save t)
+  #-sbcl (tg:finalize obj function))
+
+(declaim (inline cancel-finalization))
+(defun cancel-finalization (obj)
+  #+sbcl (sb-ext:cancel-finalization obj)
+  #-sbcl (tg:cancel-finalization obj))
+
 (defun %new-settings ()
   (let* ((ptr (new-fluid-settings))
          (obj (make-settings :ptr ptr)))
-    (tg:finalize obj (lambda () (delete-fluid-settings ptr)))
+    (finalize obj (lambda () (delete-fluid-settings ptr)))
     obj))
 
 (defun delete-settings (settings)
   (declare (type settings settings))
   (unless (deleted-p settings)
     (delete-fluid-settings (settings-ptr settings))
-    (tg:cancel-finalization settings)
+    (cancel-finalization settings)
     (setf (settings-ptr settings) (cffi:null-pointer))
     t))
 
@@ -135,11 +134,6 @@
   (len :int))
 
 (cffi:defcfun ("fluid_settings_dupstr" settings-dupstr) :int
-  (settings settings)
-  (name :string)
-  (str :pointer))
-
-(cffi:defcfun ("fluid_settings_getstr" settings-getstr) :int
   (settings settings)
   (name :string)
   (str :pointer))
@@ -216,7 +210,7 @@
 (define-constant CHANNEL-INFO-NAME-SIZE  32)
 
 (cffi:defcstruct channel-info
-    (assigned :int)
+  (assigned :int)
   (sfont-id :int)
   (bank :int)
   (program :int)
@@ -232,42 +226,18 @@
 (cffi:defcfun ("fluid_synth_get_settings" get-settings) :pointer
   (synth synth))
 
-(defun new-synth (settings)
+(defun new (settings)
   (declare (type settings settings))
   (let ((synth (new-fluid-synth (settings-ptr settings))))
-    (tg:finalize synth (lambda () (delete-fluid-synth synth)))
+    (finalize synth (lambda () (delete-fluid-synth synth)))
     (make-synth :ptr synth)))
 
-(defun delete-synth (synth)
+(defun delete (synth)
   (declare (type synth synth))
   (unless (cffi:null-pointer-p (synth-ptr synth))
     (let ((res (delete-fluid-synth (synth-ptr synth))))
-      (tg:cancel-finalization synth)
+      (cancel-finalization synth)
       (setf (synth-ptr synth) (cffi:null-pointer))
-      (zerop res))))
-
-(cffi:defcfun "new_fluid_audio_driver" :pointer
-  (settings :pointer)
-  (synth :pointer))
-
-(cffi:defcfun "delete_fluid_audio_driver" :void
-  (driver :pointer))
-
-(defun new-audio-driver (settings synth)
-  (declare (type settings settings))
-  (declare (type synth synth))
-  (let ((audio-driver (new-fluid-audio-driver (settings-ptr settings)
-                                              (synth-ptr synth))))
-    (tg:finalize audio-driver (lambda ()
-                                (delete-fluid-audio-driver audio-driver)))
-    (make-audio-driver :ptr audio-driver)))
-
-(defun delete-audio-driver (audio-driver)
-  (declare (type audio-driver audio-driver))
-  (unless (cffi:null-pointer-p (audio-driver-ptr audio-driver))
-    (let ((res (delete-fluid-audio-driver (audio-driver-ptr audio-driver))))
-      (tg:cancel-finalization audio-driver)
-      (setf (audio-driver-ptr audio-driver) (cffi:null-pointer))
       (zerop res))))
 
 ;;; MIDI channel messages
@@ -369,11 +339,6 @@
 (cffi:defcfun ("fluid_synth_unset_program" unset-program) :int
   (synth synth)
   (chan :int))
-
-(cffi:defcfun ("fluid_synth_get_channel_info" get-channel-info) :int
-  (synth synth)
-  (chan :int)
-  (info :pointer))
 
 (cffi:defcfun ("fluid_synth_program_reset" program-reset) :int
   (synth synth))
@@ -515,10 +480,12 @@
 (cffi:defcfun ("fluid_synth_get_chorus_level" get-chorus-level) :double
   (synth synth))
 
-(cffi:defcfun ("fluid_synth_get_chorus_speed_Hz" get-chorus-speed-hz) :double
+;;; Undefined alien in FluidSynth 1.x: it was "fluid_synth_get_chorus_speed_Hz".
+(cffi:defcfun ("fluid_synth_get_chorus_speed" get-chorus-speed) :double
   (synth synth))
 
-(cffi:defcfun ("fluid_synth_get_chorus_depth_ms" get-chorus-depth-ms) :double
+;;; Undefined alien in FluidSynth 1.x: it was "fluid_synth_get_chorus_depth_ms".
+(cffi:defcfun ("fluid_synth_get_chorus_depth" get-chorus-depth) :double
   (synth synth))
 
 (cffi:defcfun ("fluid_synth_get_chorus_type" get-chorus-type) :int
@@ -590,27 +557,12 @@
   (param :int)
   (value :float))
 
-(cffi:defcfun ("fluid_synth_set_gen2" set-gen2) :int
-  (synth synth)
-  (chan :int)
-  (param :int)
-  (value :float)
-  (absolute :int)
-  (normalized :int))
-
 (cffi:defcfun ("fluid_synth_get_gen" get-gen) :float
   (synth synth)
   (chan :int)
   (param :int))
 
 ;;; Tuning
-
-(cffi:defcfun ("fluid_synth_create_key_tuning" create-key-tuning) :int
-  (synth synth)
-  (bank :int)
-  (prog :int)
-  (name :string)
-  (pitch :pointer))
 
 (cffi:defcfun ("fluid_synth_activate_key_tuning" activate-key-tuning) :int
   (synth synth)
@@ -619,13 +571,6 @@
   (name :string)
   (pitch :pointer)
   (apply :boolean))
-
-(cffi:defcfun ("fluid_synth_create_octave_tuning" create-octave-tuning) :int
-  (synth synth)
-  (bank :int)
-  (prog :int)
-  (name :string)
-  (pitch :pointer))
 
 (cffi:defcfun ("fluid_synth_activate_octave_tuning" activate-octave-tuning) :int
   (synth synth)
@@ -644,22 +589,12 @@
   (pitch :pointer)
   (apply :boolean))
 
-(cffi:defcfun ("fluid_synth_select_tuning" select-tuning) :int
-  (synth synth)
-  (chan :int)
-  (bank :int)
-  (prog :int))
-
 (cffi:defcfun ("fluid_synth_activate_tuning" activate-tuning) :int
   (synth synth)
   (chan :int)
   (bank :int)
   (prog :int)
   (apply :boolean))
-
-(cffi:defcfun ("fluid_synth_reset_tuning" reset-tuning) :int
-  (synth synth)
-  (chan :int))
 
 (cffi:defcfun ("fluid_synth_deactivate_tuning" deactivate-tuning) :int
   (synth synth)
@@ -758,74 +693,3 @@
 (cffi:defcfun ("fluid_synth_handle_midi_event" handle-midi-event) :int
   (data :pointer)
   (event :pointer))
-
-(cffi:defcfun ("fluid_synth_set_midi_router" set-midi-router) :void
-  (synth synth)
-  (router :pointer))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-(cffi:defcfun "new_fluid_player" :pointer
-  (synth synth))
-
-(cffi:defcfun "delete_fluid_player" :int
-  (player player))
-
-(cffi:defcfun ("fluid_player_add" player-add) :int
-  (player player)
-  (midifile :string))
-
-(cffi:defcfun ("fluid_player_play" player-play) :int
-  (player player))
-
-(cffi:defcfun ("fluid_player_stop" player-stop) :int
-  (player player))
-
-(cffi:defcfun ("fluid_player_join" player-join) :int
-  (player player))
-
-(cffi:defcfun ("fluid_player_set_loop" player-set-loop) :int
-  (player player)
-  (loop :int))
-
-(cffi:defcfun ("fluid_player_set_midi_tempo" player-set-midi-tempo) :int
-  (player player)
-  (tempo :int))
-
-(cffi:defcfun ("fluid_player_set_bpm" player-set-bpm) :int
-  (player player)
-  (bpm :int))
-
-(cffi:defcfun ("fluid_player_get_status" player-get-status) :int
-  (player player))
-
-(cffi:defcfun ("fluid_player_get_current_tick" player-get-current-tick) :int
-  (player player))
-
-(cffi:defcfun ("fluid_player_get_total_ticks" player-get-total-ticks) :int
-  (player player))
-
-(cffi:defcfun ("fluid_player_get_bpm" player-get-bpm) :int
-  (player player))
-
-(cffi:defcfun ("fluid_player_get_midi_tempo" player-get-midi-tempo) :int
-  (player player))
-
-(cffi:defcfun ("fluid_player_seek" player-seek) :int
-  (player player)
-  (ticks :int))
-
-(defun new-player (synth)
-  (declare (type synth synth))
-  (let* ((ptr (new-fluid-player synth))
-         (obj (make-player :ptr ptr)))
-    (tg:finalize obj (lambda () (delete-fluid-player ptr)))
-    obj))
-
-(defun delete-player (player)
-  (declare (type player player))
-  (unless (cffi:null-pointer-p (player-ptr player))
-    (let ((res (delete-fluid-player (player-ptr player))))
-      (tg:cancel-finalization player)
-      (setf (player-ptr player) (cffi:null-pointer))
-      (zerop res))))
