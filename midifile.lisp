@@ -666,10 +666,15 @@ either normally or abnormally, the MIDIFILE:STREAM is automatically closed."
                  :track (input-stream-current-track mf)))
       (when (plusp delta-time)
         (incf (stream-track-time mf) delta-time)
-        (when (and (plusp (input-stream-next-tempo-time mf))
-                   (> (stream-track-time mf)
-                      (input-stream-next-tempo-time mf)))
-          (update-next-tempo-time mf (1+ (incf (input-stream-tempo-index mf))))))
+        ;; Advance the tempo index past every tempo entry we have skipped over.
+        ;; A single delta-time can jump across multiple tempo changes (common
+        ;; when a file carries a dense tempo automation curve), so loop instead
+        ;; of advancing by a single entry.
+        (loop :while (and (plusp (input-stream-next-tempo-time mf))
+                          (> (stream-track-time mf)
+                             (input-stream-next-tempo-time mf)))
+              :do (update-next-tempo-time
+                   mf (1+ (incf (input-stream-tempo-index mf))))))
       (setf (input-stream-last-delta-time mf) delta-time))))
 
 (declaim (inline read-status-byte))
@@ -775,25 +780,59 @@ MIDIFILE:INPUT-STREAM."
           (/ (- (stream-track-time mf) (tempo-time te))
              (stream-ppqn mf))))))
 
+(defun %latest-tempo-index-at-or-before (mf track-time)
+  "Return the index of the latest tempo-map entry whose TIME is <= TRACK-TIME.
+
+The tempo-map is built in non-decreasing TIME order, so we scan backwards from
+the end. This makes UPDATE-TEMPO-MAP correct even when tempo events do not live
+in the global tempo track (track 0), or when multiple tracks contribute tempo
+events: we always anchor a new entry's cached SECONDS to its true predecessor in
+time rather than to the value of TEMPO-INDEX (which is only advanced while
+reading note tracks)."
+  (declare (type midifile:input-stream mf) (type non-negative-fixnum track-time))
+  (let ((tempo-map (input-stream-tempo-map mf)))
+    (do ((i (1- (length tempo-map)) (1- i)))
+        ((or (< i 0)
+             (<= (tempo-time (aref tempo-map i)) track-time))
+         (max 0 i)))))
+
 (defun update-tempo-map (mf)
   (let* ((buf (stream-buffer mf))
          (usecs (+ (ash (aref buf 3) 16) (ash (aref buf 4) 8) (aref buf 5)))
-         (curr (current-tempo mf)))
-    (cond ((or ;; Discard a tempo change out of the global tempo track.
-               (plusp (input-stream-next-tempo-time mf))
-               ;; Ignore the duplicate.
-               (= (tempo-microseconds-per-quarter-note curr) usecs))
+         (track-time (stream-track-time mf))
+         ;; Anchor to the true predecessor tempo entry rather than CURRENT-TEMPO.
+         ;; While reading a track that *defines* the tempo map, TEMPO-INDEX is not
+         ;; advanced (NEXT-TEMPO-TIME is only consulted on note tracks), so
+         ;; CURRENT-TEMPO would otherwise be stuck at the first entry and every
+         ;; cached SECONDS would be computed against the wrong base tempo.
+         (prev-index (%latest-tempo-index-at-or-before mf track-time))
+         (prev (aref (input-stream-tempo-map mf) prev-index)))
+    (declare (type non-negative-fixnum track-time))
+    (cond (;; Discard a tempo change found while reading a track that is *not*
+           ;; the one which defines the tempo map. NEXT-TEMPO-TIME is only
+           ;; positive once the tempo map has been built and we are replaying it
+           ;; against note tracks, so a tempo event seen here lives in a
+           ;; secondary track and would corrupt the (time-ordered) map.
+           (plusp (input-stream-next-tempo-time mf))
            nil)
-          ((= (stream-track-time mf) (tempo-time curr))
+          (;; Ignore the duplicate.
+           (= (tempo-microseconds-per-quarter-note prev) usecs)
+           nil)
+          ((= track-time (tempo-time prev))
            ;; Multiple changes at the same time: the last closes the door.
-           (setf (tempo-microseconds-per-quarter-note curr) usecs))
+           (setf (tempo-microseconds-per-quarter-note prev) usecs))
           (t
-           (setf (input-stream-tempo-index mf)
-                 (vector-push-extend
-                   (make-tempo :time (stream-track-time mf)
-                               :seconds (event-seconds mf)
-                               :microseconds-per-quarter-note usecs)
-                   (input-stream-tempo-map mf) 4))))
+           (let ((seconds (+ (tempo-seconds prev)
+                             (* (tempo-microseconds-per-quarter-note prev)
+                                1d-6
+                                (/ (- track-time (tempo-time prev))
+                                   (stream-ppqn mf))))))
+             (setf (input-stream-tempo-index mf)
+                   (vector-push-extend
+                     (make-tempo :time track-time
+                                 :seconds seconds
+                                 :microseconds-per-quarter-note usecs)
+                     (input-stream-tempo-map mf) 4)))))
     (values)))
 
 (defun read-event (mf)
